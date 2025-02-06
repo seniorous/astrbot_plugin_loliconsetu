@@ -6,7 +6,7 @@ import json
 import asyncio
 import re
 
-@register("loliconsetu", "rikka", "支持参数自选的涩图插件", "2.0.0")
+@register("loliconsetu", "seniorous", "支持参数自选的涩图插件", "2.0.0")
 class LoliconSetuPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -19,12 +19,16 @@ class LoliconSetuPlugin(Star):
             "r18": 0,
             "size": "regular",
             "num": 1,
-            "tag": "",
-            "author": ""
+            "tag": [],
+            "author": "",
+            "proxy": "i.pixiv.re",
+            "ai": False,
+            "anime": "",
+            "character": ""
         }
         
         # 使用正则匹配参数
-        matches = re.findall(r'(r18|size|num|tag|author)=([^&\s]+)', params)
+        matches = re.findall(r'(r18|size|num|tag|author|proxy|ai|anime|character)=([^&\s]+)', params.lower())
         for key, value in matches:
             value = value.strip('"\'')  # 去除引号
             if key == "r18":
@@ -42,6 +46,14 @@ class LoliconSetuPlugin(Star):
                 args["tag"] = value
             elif key == "author":
                 args["author"] = value
+            elif key == "proxy":
+                args["proxy"] = value
+            elif key == "ai":
+                args["ai"] = True if value.lower() in ["true", "yes", "1"] else False
+            elif key == "anime":
+                args["anime"] = value
+            elif key == "character":
+                args["character"] = value
         
         return args
 
@@ -61,12 +73,17 @@ class LoliconSetuPlugin(Star):
             query_params = {
                 "r18": api_params['r18'],
                 "size": api_params['size'],
-                "num": api_params['num']
+                "num": api_params['num'],
+                "ai_illust": api_params.get('ai', False),
+                "anime": api_params.get('anime', ""),
+                "character": api_params.get('character', "")
             }
             if api_params['tag']:
                 query_params["tag"] = api_params['tag']
             if api_params['author']:
                 query_params["author"] = api_params['author']
+            if api_params['proxy']:
+                query_params["proxy"] = api_params['proxy']
             
             async with httpx.AsyncClient() as client:
                 resp = await client.get("https://api.lolicon.app/setu/v2", params=query_params)
@@ -76,12 +93,13 @@ class LoliconSetuPlugin(Star):
                 if data['data']:
                     chains = []
                     for setu_data in data['data'][:api_params['num']]:  # 限制最大返回数量
-                        image_url = setu_data['urls'][api_params['size']]
+                        image_url = setu_data['urls'][api_params['size']].replace("i.pixiv.cat", api_params['proxy'])
                         chain = [
                             At(qq=event.get_sender_id()),
-                            Plain(f"参数设置：R18={'开启' if api_params['r18'] else '关闭'} 尺寸={api_params['size']}\n"),
+                            Plain(f"参数设置：R18={'开启' if api_params['r18'] else '关闭'} 尺寸={api_params['size']} AI生成={'是' if api_params['ai'] else '否'}\n"),
+                            Plain(f"动画作品：{api_params['anime']} 角色：{api_params['character']}\n"),
                             Plain(f"PID：{setu_data['pid']} | 作者：{setu_data['author']} | 标签：{', '.join(setu_data['tags'])}\n"),
-                            Image.fromURL(image_url, size=api_params['size']),
+                            Image.fromURL(image_url, size=api_params['size'], file_type='image'),
                         ]
                         chains.append(chain)
                     
@@ -120,11 +138,16 @@ class LoliconSetuPlugin(Star):
         • num=1-10 - 获取数量
         • tag=标签 - 指定标签
         • author=作者 - 指定画师
+        • proxy=代理地址 - 自定义图片代理(默认i.pixiv.re)
+        • ai=yes/no - AI生成模式
+        • anime=动画名称 - 指定动画作品
+        • character=角色名 - 指定角色
         
         示例：
-        /setu r18=yes size=original num=3
-        /setu tag=白丝 author=画师A
-        /setu size=small num=5
+        /setu r18=yes size=original num=3 ai=yes
+        /setu tag=白丝 author=画师A character=初音未来
+        /setu anime=刀剑神域 size=small num=5 
+        /setu proxy=px2.rainchan.win ai=no anime=CLANNAD
         
         /setucd <秒数> - 设置指令冷却时间
         /setu_help - 显示本帮助
