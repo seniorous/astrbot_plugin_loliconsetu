@@ -28,9 +28,10 @@ class LoliconSetuPlugin(Star):
         }
         
         # 使用改进版正则匹配参数，支持带空格的引号值和数组参数
+        # 增强版参数解析正则，支持更灵活的参数格式
         matches = re.findall(
-            r'(r18|size|num|tag|author|proxy|ai|anime|character)='
-            r'("[^"]+"|\'[^\']+\'|[\w\-.,]+)', 
+            r'\b(r18|size|num|tag|author|proxy|ai|anime|character)\s*=\s*'
+            r'("[^"\\]*(?:\\.[^"\\]*)*"|\'[^\'\\]*(?:\\.[^\'\\]*)*\'|\[.*?\]|\S+)',
             params,
             re.IGNORECASE
         )
@@ -78,17 +79,22 @@ class LoliconSetuPlugin(Star):
         
         return args
 
-    @filter.command("setu {{params}}")
+    @filter.command("setu <params>")
     async def setu(self, event: AstrMessageEvent, params: str = ""):
         user_id = event.get_sender_id()
         now = asyncio.get_event_loop().time()
-
-        if user_id in self.last_usage and (now - self.last_usage[user_id]) < self.cd:
-            remaining_time = self.cd - (now - self.last_usage[user_id])
-            yield event.plain_result(f"冷却中，请等待 {remaining_time:.1f} 秒后重试。")
-            return
+        debug_info = []  # 调试信息收集
 
         try:
+            # 调试信息：记录原始参数
+            debug_info.append(f"原始参数: {params}")
+
+            # 检查冷却时间
+            if user_id in self.last_usage and (now - self.last_usage[user_id]) < self.cd:
+                remaining_time = self.cd - (now - self.last_usage[user_id])
+                yield event.plain_result(f"冷却中，请等待 {remaining_time:.1f} 秒后重试。")
+                return
+
             # 解析参数
             api_params = self.parse_setu_params(params)
             query_params = {
@@ -112,9 +118,35 @@ class LoliconSetuPlugin(Star):
             if api_params['proxy']:
                 query_params["proxy"] = api_params['proxy']
             
-            async with httpx.AsyncClient() as client:
-                resp = await client.get("https://api.lolicon.app/setu/v2", params=query_params)
-                resp.raise_for_status()
+            # 配置超时和重试参数
+            # 优化超时和重试配置
+            timeout = httpx.Timeout(connect=10.0, read=20.0, write=10.0)
+            retry_strategy = httpx.AsyncRetry(
+                max_retries=3,
+                status_forcelist=[500, 502, 503, 504, 524, 529],
+                allowed_methods=["GET"],
+                backoff_factor=1.5
+            )
+            
+            async with httpx.AsyncClient(timeout=timeout, limits=httpx.Limits(max_connections=5)) as client:
+                for attempt in range(3):  # 总尝试次数=重试次数+1
+                    try:
+                        resp = await client.get(
+                            "https://api.lolicon.app/setu/v2",
+                            params=query_params,
+                            retries=retry_strategy
+                        )
+                        resp.raise_for_status()
+                        break  # 请求成功则跳出重试循环
+                    except (httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+                        if attempt >= 2:
+                            raise RuntimeError(f"API请求超时（尝试{attempt+1}次）") from e
+                        await asyncio.sleep(1.5 * (attempt + 1))  # 指数退避
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code in [502, 503, 504] and attempt < 2:
+                            await asyncio.sleep(2)
+                            continue
+                        raise
                 data = resp.json()
                 
                 if data['data']:
@@ -143,13 +175,18 @@ class LoliconSetuPlugin(Star):
             yield event.plain_result(f"API请求失败: {e}")
         except json.JSONDecodeError as e:
             yield event.plain_result(f"响应解析错误: {e}")
-        except KeyError as e:
+        except (KeyError, ValueError) as e:
             yield event.chain_result([
                 Plain("参数解析错误：\n"),
                 Plain(f"• 错误类型：{type(e).__name__}\n"),
                 Plain(f"• 错误详情：{str(e)}\n"),
+                Plain("常见错误原因：\n"),
+                Plain("1. 参数格式不正确（缺少=号或值未加引号）\n"),
+                Plain("2. 使用了不支持的参数值（如size=invalid）\n"), 
+                Plain("3. 数值超出允许范围（如num=20）\n"),
                 Plain("请参考帮助文档检查参数格式：\n"),
-                Plain("/setu_help")
+                Plain("/setu_help\n"),
+                Plain("正确示例：/setu r18=yes size=original num=3")
             ])
 
     @filter.command("setucd <cd_time>")
